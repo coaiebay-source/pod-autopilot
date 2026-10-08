@@ -1,0 +1,48 @@
+[project]
+name = "pod-autopilot"
+version = "0.1.0"
+description = "Autonomous print-on-demand pipeline: Square + Printful + OpenBot"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.32",
+    "Pillow>=10.4",
+    "psycopg[binary]>=3.2",
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "mcp>=1.2",
+    "cairosvg>=2.7",   # zero-cash vector art lane
+]
+
+[project.optional-dependencies]
+# Shape B deployment only -- a custom AG-UI agent instead of OpenBot's managed
+# coworker. Pin these tightly; both move fast.
+agent = [
+    "langgraph>=0.2",
+    "langchain>=0.3",
+    "langchain-anthropic>=0.3",
+    "ag-ui-protocol",
+    "ag-ui-langgraph",
+]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+pod-validate = "pod.cli:validate"
+pod-run-one = "pod.cli:run_one"
+pod-report = "pod.cli:report"
+pod-halt = "pod.cli:halt"
+pod-webhooks = "pod.webhooks_serve:main"
+pod-mcp = "pod.mcp_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pod"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

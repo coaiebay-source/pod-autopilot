@@ -1,0 +1,55 @@
+# Every 30 min: pull Square orders/refunds + Printful status, sync clicks, decide
+# tests (scale/kill/hold), run the Sentinel, rebuild the Pinterest feed.
+# Replaces the webhook receiver + ops-sentinel bot. ~1-2 min/run -> ~60-90 min/mo.
+name: ops
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+concurrency: { group: pod-pipeline, cancel-in-progress: false }
+permissions: { contents: write, issues: write }
+
+jobs:
+  ops:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DRY_RUN: ${{ vars.DRY_RUN || '1' }}
+      TRAFFIC_MODE: organic
+      PRINTFUL_API_TOKEN: ${{ secrets.PRINTFUL_API_TOKEN }}
+      SQUARE_ACCESS_TOKEN: ${{ secrets.SQUARE_ACCESS_TOKEN }}
+      SQUARE_LOCATION_ID: ${{ secrets.SQUARE_LOCATION_ID }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      ASSETS_GH_REPO: ${{ vars.ASSETS_GH_REPO }}
+      ASSETS_GH_TOKEN: ${{ secrets.ASSETS_GH_TOKEN }}
+      SQUARE_STORE_URL: ${{ vars.SQUARE_STORE_URL }}
+      CLICK_WORKER_URL: ${{ vars.CLICK_WORKER_URL }}
+      CLICK_STATS_TOKEN: ${{ secrets.CLICK_STATS_TOKEN }}
+      FEED_SITE_URL: ${{ vars.FEED_SITE_URL }}      # https://<you>.github.io/<repo>
+      STORE_NAME: ${{ vars.STORE_NAME }}
+      FONT_DIR: ./fonts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -e . "psycopg[binary]"
+      - name: ops sweep
+        id: ops
+        run: python -m pod.batch ops
+      - name: publish Pinterest feed (GitHub Pages serves /public)
+        if: always()
+        run: |
+          if git status --porcelain public/ | grep -q .; then
+            git config user.name pod-bot && git config user.email pod-bot@users.noreply.github.com
+            git add public/feed.xml && git commit -m "feed: $(date -u +%FT%TZ)" && git push
+          fi
+      - name: open an issue on HALT (the one human touchpoint)
+        if: failure() && steps.ops.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "SENTINEL HALT " + new Date().toISOString().slice(0,10);
+            const open = await github.rest.issues.listForRepo({...context.repo, state:"open", labels:"halt"});
+            if (open.data.length) return;
+            await github.rest.issues.create({...context.repo, title, labels:["halt"],
+              body: "The Sentinel refused to proceed. See the failed `ops` run log, fix the cause, then run `python -m pod.cli resume \"note\"`.\n\nAssign @copilot or mention @claude here to investigate automatically."});

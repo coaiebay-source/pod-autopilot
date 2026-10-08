@@ -1,0 +1,16 @@
+# Serves /public (feed.xml for Pinterest auto-publish) at https://<you>.github.io/<repo>/
+# Settings -> Pages -> Source: GitHub Actions. Works on a PRIVATE repo with GitHub Pro.
+name: pages
+on:
+  push: { branches: [main], paths: ["public/**"] }
+  workflow_dispatch:
+permissions: { pages: write, id-token: write, contents: read }
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: { name: github-pages }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: public }
+      - uses: actions/deploy-pages@v4

@@ -1,0 +1,134 @@
+{
+  "_comment": [
+    "OpenBot action policy (AGENT_COMPUTER_POLICY). Evaluated by the gateway",
+    "BEFORE every browser / file / shell / MCP action. Deny rules are evaluated",
+    "before allow rules, and missing or malformed policy FAILS CLOSED.",
+    "",
+    "IMPORTANT: the policy that ships in OpenBot's start script allows all",
+    "actions. That is fine for a laptop demo and unacceptable for a bot that",
+    "spends money and publishes to a live storefront. Replace it with this.",
+    "",
+    "Rules are CEL expressions. Available fields include tool name, intent,",
+    "bot id, page url, element attributes and file path. Consult",
+    "OpenBot docs/policy.md for the exact schema of your pinned version --",
+    "field names have moved between alpha releases, so verify against the",
+    "commit you deploy rather than trusting this file blindly."
+  ],
+
+  "version": 1,
+  "default_effect": "deny",
+
+  "deny": [
+    {
+      "id": "never-touch-payment-instruments",
+      "why": "A bot that can edit billing can drain the account. Fulfillment billing is set once by a human and never touched again.",
+      "when": "url.contains('squareup.com') && (url.contains('billing') || url.contains('/bank-accounts') || url.contains('payment-method'))",
+      "effect": "deny"
+    },
+    {
+      "id": "never-touch-printful-billing",
+      "why": "Same. Printful billing methods are a human-only surface.",
+      "when": "url.contains('printful.com') && url.contains('billing')",
+      "effect": "deny"
+    },
+    {
+      "id": "never-disable-the-integration",
+      "why": "Disconnecting the store breaks fulfillment for every open order.",
+      "when": "url.contains('printful.com/dashboard/stores') && intent.contains('disconnect')",
+      "effect": "deny"
+    },
+    {
+      "id": "never-change-store-order-settings",
+      "why": "'Manually confirm imported orders' and shipping profiles must stay exactly as a human set them. A bot flipping one of these silently stops all fulfillment.",
+      "when": "url.contains('printful.com/dashboard/store') && url.contains('settings')",
+      "effect": "deny"
+    },
+    {
+      "id": "never-edit-square-developer-app",
+      "why": "Token and webhook config is infrastructure. Changing it breaks attribution.",
+      "when": "url.contains('developer.squareup.com')",
+      "effect": "deny"
+    },
+    {
+      "id": "never-touch-ad-budgets-above-cap",
+      "why": "Hard ceiling. The Sentinel checks budget too; this is the second, independent layer. Two layers because one layer is a rounding error away from a bad month.",
+      "when": "intent.contains('increase budget') || intent.contains('raise daily spend')",
+      "effect": "deny"
+    },
+    {
+      "id": "never-delete-orders-or-customers",
+      "why": "Irreversible destruction of records you legally must keep.",
+      "when": "url.contains('/orders') && intent.contains('delete')",
+      "effect": "deny"
+    },
+    {
+      "id": "never-navigate-off-allowlist",
+      "why": "Prompt injection arrives as a web page. A research bot that follows a link into an attacker's page can be told to do anything. Confining navigation to a fixed allowlist is the containment.",
+      "when": "!(url.matches('^https://(trends\\\\.google\\\\.com|www\\\\.etsy\\\\.com|www\\\\.amazon\\\\.com|www\\\\.reddit\\\\.com|old\\\\.reddit\\\\.com|www\\\\.pinterest\\\\.com|squareup\\\\.com|printful\\\\.com|api\\\\.printful\\\\.com|connect\\\\.squareupsandbox\\\\.com|developers\\\\.printful\\\\.com|tsdr\\\\.uspto\\\\.gov|tmsearch\\\\.uspto\\\\.gov|localhost)(/.*)?$'))",
+      "effect": "deny"
+    },
+    {
+      "id": "no-shell-except-pipeline",
+      "why": "Shell is the escape hatch from every other rule. Restrict it to the pipeline entrypoints.",
+      "when": "tool == 'shell' && !(command.startsWith('python -m pod.') || command.startsWith('uv run pod'))",
+      "effect": "deny"
+    },
+    {
+      "id": "no-writing-outside-workspace",
+      "why": "Keep artifacts inside the bot's own container volume.",
+      "when": "tool.startsWith('file') && !path.startsWith('/workspace/')",
+      "effect": "deny"
+    },
+    {
+      "id": "no-reading-credentials",
+      "why": "Secrets are injected as env vars and must never be read back into a transcript or a file the model can see.",
+      "when": "path.contains('.env') || path.contains('credentials') || path.contains('/root/.ssh')",
+      "effect": "deny"
+    }
+  ],
+
+  "allow": [
+    {
+      "id": "square-item-visibility",
+      "why": "THE reason this bot needs a browser at all. ecom_visibility is read-only in the Square API; flipping Site visibility to Visible for a new Printful item is a dashboard-only action.",
+      "when": "bot == 'catalog-bot' && url.contains('squareup.com/dashboard') && (url.contains('/items') || url.contains('/online'))",
+      "effect": "allow"
+    },
+    {
+      "id": "square-storefront-verification",
+      "why": "Ground truth for 'is this actually purchasable'. Reads the public site, clicks nothing.",
+      "when": "bot == 'catalog-bot' && intent.contains('verify listing is visible')",
+      "effect": "allow"
+    },
+    {
+      "id": "printful-order-queue-triage",
+      "why": "NEEDS_APPROVAL orders are paid-but-unprinted. A human should normally handle these; allow read + the single 'Complete order' action so the bot can unstick a known-benign case and alarm on the rest.",
+      "when": "bot == 'ops-sentinel' && url.contains('printful.com/dashboard/orders')",
+      "effect": "allow"
+    },
+    {
+      "id": "trend-research-browsing",
+      "why": "Demand discovery requires real pages. Google Trends, Etsy search, Amazon BSR, Reddit, Pinterest.",
+      "when": "bot == 'trend-scout' && (url.startsWith('https://trends.google.com') || url.startsWith('https://www.etsy.com/search') || url.startsWith('https://www.amazon.com/Best-Sellers') || url.contains('reddit.com/r/') || url.startsWith('https://www.pinterest.com'))",
+      "effect": "allow"
+    },
+    {
+      "id": "uspto-clearance-lookup",
+      "why": "IP screening must reach the authoritative registry.",
+      "when": "bot == 'ip-guard' && url.contains('uspto.gov')",
+      "effect": "allow"
+    },
+    {
+      "id": "pipeline-shell",
+      "why": "The bots invoke the Python pipeline. Only the pod.* entrypoints are reachable.",
+      "when": "tool == 'shell' && (command.startsWith('python -m pod.') || command.startsWith('uv run pod'))",
+      "effect": "allow"
+    },
+    {
+      "id": "workspace-files",
+      "why": "Design artifacts, reports, cached signal data.",
+      "when": "tool.startsWith('file') && path.startsWith('/workspace/')",
+      "effect": "allow"
+    }
+  ]
+}

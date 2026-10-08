@@ -1,0 +1,69 @@
+# Daily: raw signals -> LLM candidates -> score -> IP -> design -> mockups -> list.
+# Replaces OpenBot's trend-scout / design-director / ip-guard / catalog-bot routines.
+# Cost: ~10-15 Actions minutes/day. GitHub Pro (Student Pack) = 3,000 min/mo.
+name: daily-discover-design
+on:
+  schedule:
+    - cron: "17 14 * * *"        # 07:17 Pacific. Offset minutes: :00 is congested.
+  workflow_dispatch:
+    inputs:
+      max:
+        description: "max candidates"
+        default: "8"
+concurrency: { group: pod-pipeline, cancel-in-progress: false }   # never two writers
+permissions: { contents: write }
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # ---- mode ----
+      DRY_RUN: ${{ vars.DRY_RUN || '1' }}            # repo Variable; flip to 0 when ready
+      TRAFFIC_MODE: organic
+      ART_PROVIDER: ${{ vars.ART_PROVIDER || 'svg' }}
+      LLM_PROVIDER: ${{ vars.LLM_PROVIDER || 'claude_code,gemini,github_models' }}
+      # ---- credentials (Settings -> Secrets and variables -> Actions) ----
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}   # claude setup-token (Pro)
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GH_MODELS_TOKEN: ${{ secrets.GH_MODELS_TOKEN }}
+      PRINTFUL_API_TOKEN: ${{ secrets.PRINTFUL_API_TOKEN }}
+      SQUARE_ACCESS_TOKEN: ${{ secrets.SQUARE_ACCESS_TOKEN }}
+      SQUARE_LOCATION_ID: ${{ secrets.SQUARE_LOCATION_ID }}
+      APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}       # Neon free tier
+      ASSETS_GH_REPO: ${{ vars.ASSETS_GH_REPO }}      # e.g. you/pod-assets (PUBLIC)
+      ASSETS_GH_TOKEN: ${{ secrets.ASSETS_GH_TOKEN }}
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+      SQUARE_STORE_URL: ${{ vars.SQUARE_STORE_URL }}
+      CLICK_WORKER_URL: ${{ vars.CLICK_WORKER_URL }}
+      CLICK_STATS_TOKEN: ${{ secrets.CLICK_STATS_TOKEN }}
+      POD_NICHES: ${{ vars.POD_NICHES || 'nursing,teacher,dogs,plants,fishing,pickleball' }}
+      CAP_NEW_LISTINGS_DAY: ${{ vars.CAP_NEW_LISTINGS_DAY || '4' }}
+      FONT_DIR: ./fonts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - name: install
+        run: |
+          pip install -e . "psycopg[binary]" cairosvg
+          npm i -g @anthropic-ai/claude-code
+      - name: readiness
+        run: python scripts/zero_cash_check.py
+      - name: discover (LLM proposes)
+        run: python -m pod.batch discover --max "${{ github.event.inputs.max || '8' }}"
+      - name: design + list (code disposes)
+        run: python -m pod.batch design
+      - name: keep artifacts (svg masters, previews, run log)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: run-${{ github.run_id }}
+          retention-days: 30
+          path: |
+            artifacts/*.svg
+            state/*.json

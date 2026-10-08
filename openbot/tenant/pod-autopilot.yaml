@@ -1,0 +1,271 @@
+# OpenBot tenant package for POD Autopilot.
+#
+# Points TENANT_PACKAGE_DIR here. Defines the Bots (coworkers), their standing
+# roles, granted capabilities, and the MCP tools each may use.
+#
+# SCHEMA WARNING: the tenant YAML shape has changed between OpenBot alpha
+# releases. Before deploying, diff this against `examples/fintech/` in the exact
+# commit you check out and reconcile field names. The server validates the
+# package at startup and refuses to boot on a mismatch, which is the good news:
+# you find out immediately rather than at 3am.
+
+id: pod-autopilot
+name: POD Autopilot
+description: >
+  Autonomous print-on-demand operator. Discovers demand, generates and screens
+  designs, publishes to Square Online via Printful, tests, scales winners and
+  kills losers. Every action gated by policy and recorded in the audit trail.
+
+# One computer per Bot. Do not share: the TrendScout browses hostile third-party
+# pages and the CatalogBot holds a live Square session. Sharing a browser
+# profile between those two is how a prompt injection on a research page becomes
+# an action on your store dashboard.
+one_computer_each: true
+
+credentials:
+  # Stored write-only and encrypted. Values never enter a transcript; the audit
+  # trail records that a secret was requested and for how long, not its content.
+  - key: PRINTFUL_API_TOKEN
+    description: Printful store API token (Dashboard -> Settings -> API)
+  - key: SQUARE_ACCESS_TOKEN
+    description: Square Personal Access Token, production
+  - key: OPENAI_API_KEY
+    description: Image generation (design artwork)
+  - key: ANTHROPIC_API_KEY
+    description: Bot reasoning model
+  - key: APIFY_TOKEN
+    description: USPTO TESS trademark actor
+  - key: ASSET_R2_KEY
+    description: Cloudflare R2 credential for hosting print files
+
+mcp_servers:
+  - name: pod-pipeline
+    description: The deterministic pipeline. All mechanics live here.
+    transport: stdio
+    command: ["uv", "run", "python", "-m", "pod.mcp_server"]
+    env_from: [PRINTFUL_API_TOKEN, SQUARE_ACCESS_TOKEN, DATABASE_URL, ASSET_BASE_URL]
+
+bots:
+  # ---------------------------------------------------------------------
+  - id: trend-scout
+    name: Trend Scout
+    role: >
+      Find demand worth serving. Each run: pick 3-5 candidate niches from your
+      standing niche list, generate candidate concepts, then VALIDATE each one
+      with machine-captured signals. You do not decide what is trending -- you
+      look it up. Call `pod.sweep_demand` for every concept and report the
+      numbers. If the lookup fails or returns no data, report the concept as
+      UNVALIDATED and do not promote it. A concept you assert is trending
+      without a saved evidence URL is worthless to this system.
+
+      Prefer niches with an identifiable community (a subreddit, a sport, a
+      profession, a hobby) over broad demographics. "Nurses who work nights"
+      outsells "women 25-44" because the first group recognizes itself.
+
+      Record the audience's own vocabulary. The phrase that goes on the shirt
+      should be a sentence a member of that group would actually say, not a
+      marketing description of them.
+    grants:
+      browser: true
+      shell: false
+      files: ["/workspace/research/**"]
+      mcp_tools:
+        - pod.sweep_demand
+        - pod.record_concept
+        - pod.existing_concepts
+    skills:
+      - google_trends_breakout
+      - etsy_competition_density
+      - amazon_bsr_snapshot
+      - reddit_audience_language
+    routines:
+      - name: daily_demand_sweep
+        # OpenBot enforces a 15-minute floor and a 20-enabled-routine cap.
+        # Once daily is correct here -- trends do not move hourly, and running
+        # this more often just re-discovers yesterday's ideas and burns tokens.
+        schedule: "0 13 * * *"
+        instruction: >
+          Run the daily demand sweep. Target: 10 validated concepts, of which
+          at least 3 score >= 0.55 with >= 2 corroborating sources. Write
+          results to /workspace/research/$(date +%F).json and hand the passing
+          concepts to Design Director.
+
+  # ---------------------------------------------------------------------
+  - id: design-director
+    name: Design Director
+    role: >
+      Turn a validated concept into a print file. You choose the PHRASE, the
+      ART DIRECTION, the STYLE, and the LAYOUT. You do not draw it and you do
+      not render text.
+
+      Critical constraint: the image model renders artwork ONLY. Never ask it
+      for text, letters, or words -- diffusion models produce plausible-looking
+      garbage letterforms, and a shirt that says "STILL RUNNIG ON CAFFEINNE" is
+      a return and a bad review. Write the phrase as a separate field; the
+      pipeline typesets it with a real font at print resolution.
+
+      Choose from the fixed style library (retro_sunset, vintage_national_park,
+      bootleg_90s, minimal_line, sticker_bomb, engraved, vaporwave). Staying
+      inside 3-5 styles is what makes the store read as a brand instead of a
+      pile of unrelated AI images.
+
+      Submit every phrase AND every title/description string to `pod.screen_ip`
+      BEFORE building. Do not build first and screen after -- a rejected design
+      costs an image generation and your time.
+
+      If a concept is rejected on IP, do not misspell the flagged term, do not
+      stylize around it, do not translate it. Evasive variants are still
+      infringement and look worse in a dispute. Generate a genuinely different
+      concept and re-screen.
+    grants:
+      browser: false
+      shell: false
+      files: ["/workspace/designs/**", "/workspace/fonts/**"]
+      mcp_tools:
+        - pod.screen_ip
+        - pod.build_design
+        - pod.list_styles
+    routines:
+      - name: design_queue
+        schedule: "30 13 * * *"
+        instruction: >
+          Process the scored concept queue. For each concept scoring >= 0.55:
+          write the phrase, pick a style, screen it, and if it clears call
+          pod.build_design. Stop after 6 designs (the daily listing cap).
+
+  # ---------------------------------------------------------------------
+  - id: ip-guard
+    name: IP Guard
+    role: >
+      Independent second opinion on clearance. You run AFTER Design Director
+      and BEFORE anything publishes. Your bias is rejection.
+
+      Check the phrase, the title, the description, and the artwork. Screen
+      against USPTO Class 25 (and 21/16/18 for mugs/posters/totes). Flag any
+      live OR pending mark -- a pending application can still get you a
+      takedown. Flag celebrity names and likenesses, sports leagues and teams,
+      franchise characters, song lyrics, and "generic-feeling" phrases that are
+      nonetheless registered (this is where most sellers get caught: "Mama
+      Bear", "Best Dad Ever", "Girl Boss" all have live registrations).
+
+      If the screen errors, times out, or returns no data, the verdict is
+      REJECT. Fail closed. Being wrong in the safe direction costs one design;
+      being wrong the other way can cost the merchant account.
+    grants:
+      browser: true
+      shell: false
+      files: ["/workspace/ip/**"]
+      mcp_tools:
+        - pod.screen_ip
+        - pod.uspto_lookup
+        - pod.record_ip_strike
+    routines:
+      - name: pre_publish_clearance
+        schedule: "0 14 * * *"
+        instruction: >
+          Review every experiment in DESIGNED or MOCKED_UP stage that has not
+          passed your independent check. Reject or pass each. Any rejection
+          moves the experiment to KILLED with the reason recorded.
+
+  # ---------------------------------------------------------------------
+  - id: catalog-bot
+    name: Catalog Bot
+    role: >
+      Publish cleared designs and confirm they are actually buyable.
+
+      Mechanics are handled by the pipeline over API: Printful sync product
+      creation (which pushes the listing to Square), pricing, SKU mapping. Your
+      browser job is the one thing no API can do:
+
+      Square's `ecom_visibility` field is READ-ONLY. There is no public API to
+      make an item visible on Square Online. After publishing, load the public
+      storefront and confirm the product appears and is purchasable. If it does
+      not, go to Square Dashboard -> Online -> Items -> Site Items, open the
+      item, set Site visibility to Visible, and Save.
+
+      A human should have already set the default: Dashboard -> Online -> Items
+      -> Item Sync -> Item visibility settings -> Visible. If that default is
+      in place you will rarely need to flip anything, and that is the correct
+      steady state -- your job is verification, not routine clicking.
+
+      Never touch billing, bank accounts, payment methods, or store settings.
+      Those are denied by policy.
+    grants:
+      browser: true
+      shell: true
+      files: ["/workspace/catalog/**"]
+      mcp_tools:
+        - pod.publish_experiment
+        - pod.verify_listing_visible
+        - pod.reprice_experiment
+        - pod.delist_experiment
+    skills:
+      - square_flip_item_visibility
+      - square_verify_storefront_listing
+    routines:
+      - name: publish_and_verify
+        schedule: "30 14 * * *"
+        instruction: >
+          Publish every IP_CLEARED experiment that has a print file and >= 3
+          mockups. After each publish, verify storefront visibility. Record
+          any item that exists in the catalog but is not visible as an ops
+          alert.
+
+  # ---------------------------------------------------------------------
+  - id: ops-sentinel
+    name: Ops Sentinel
+    role: >
+      Watch the machine and stop it when it misbehaves. You are the only Bot
+      with authority to halt.
+
+      Continuously check: Printful orders stuck in NEEDS_APPROVAL (a customer
+      paid and nothing is printing -- the most common silent failure in POD
+      automation), order_failed events, weekly fulfillment spend against cap,
+      ad spend against daily and weekly caps, refund rate, and listing velocity.
+
+      Then evaluate every mature test and render the verdict: SCALE or KILL. A
+      test is mature only at >= 5 days AND >= 800 impressions. Killing a design
+      after 40 impressions is not a decision, it is noise -- hold it.
+
+      When you kill an experiment, delist it from Printful AND Square. A killed
+      design left live keeps taking orders you decided you did not want.
+
+      If any hard threshold trips, call pod.emergency_halt immediately and
+      notify. Do not wait for the next scheduled run. Do not try to fix the
+      underlying problem yourself -- halting is the job.
+    grants:
+      browser: true
+      shell: true
+      files: ["/workspace/ops/**"]
+      mcp_tools:
+        - pod.check_guardrails
+        - pod.emergency_halt
+        - pod.evaluate_tests
+        - pod.needs_approval_orders
+        - pod.daily_report
+        - pod.record_ad_spend
+    routines:
+      - name: guardrail_check
+        # 15 minutes is OpenBot's floor. This is the one routine that genuinely
+        # wants to run often: it is the thing that catches a runaway spend loop.
+        schedule: "*/15 * * * *"
+        instruction: >
+          Run pod.check_guardrails. If any hard threshold trips, call
+          pod.emergency_halt with the reason and stop. Otherwise log clear.
+      - name: test_verdicts
+        schedule: "0 6 * * *"
+        instruction: >
+          Evaluate every TESTING experiment. Scale or kill per the maturity and
+          benchmark gates. Delist anything killed.
+      - name: daily_pnl
+        schedule: "0 7 * * *"
+        instruction: "Run pod.daily_report and send it to the owner's channel."
+
+# Reachability: where the Sentinel's halt notification lands. Configure under
+# /reachability in the OpenBot UI. An autonomous system whose kill-switch alarm
+# nobody receives is not autonomous, it is unattended.
+notifications:
+  halt:
+    channels: [sms, email]
+  daily_report:
+    channels: [email]

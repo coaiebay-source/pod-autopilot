@@ -1,0 +1,10 @@
+name = "pod-go"
+main = "index.js"
+compatibility_date = "2026-01-01"
+
+# wrangler kv namespace create CLICKS   -> paste the id below
+[[kv_namespaces]]
+binding = "CLICKS"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# secrets:  wrangler secret put STATS_TOKEN
